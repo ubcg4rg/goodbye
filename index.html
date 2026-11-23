@@ -98,10 +98,12 @@
 </main>
 
 <script>
+  const PEN_SCALE = 4094;
+
+  const surface = document.querySelector('#surface');
   const cover = document.querySelector('#cover');
   const tablet = document.querySelector('#tablet');
   const paper = document.querySelector('#paper');
-  const surface = document.querySelector('#surface');
   const turn = document.querySelector('#turn');
   const undo = document.querySelector('#undo');
   const share = document.querySelector('#share');
@@ -114,45 +116,14 @@
   makerURL.hash = '';
   document.querySelector('#brand').href = makerURL.href;
 
-  const encodedNote = new URLSearchParams(location.hash.slice(1)).get('note');
+  const params = new URLSearchParams(location.hash.slice(1));
+  const encodedNote = params.get('note');
   const viewing = encodedNote !== null;
+
   let strokes = [];
-  let activeStroke = null;
+  let active = null;
   let gesture = null;
-
-  function readNote(encoded) {
-    const bytes = Uint8Array.from(atob(encoded), char => char.charCodeAt(0));
-    if (!bytes.length || bytes.length % 2) throw new Error('Invalid note');
-
-    const result = [];
-    let stroke = [];
-    for (let i = 0; i < bytes.length; i += 2) {
-      if (bytes[i] === 255 && bytes[i + 1] === 255) {
-        if (!stroke.length) throw new Error('Invalid stroke');
-        result.push(stroke);
-        stroke = [];
-      } else {
-        if (bytes[i] > 250 || bytes[i + 1] > 250) throw new Error('Invalid point');
-        stroke.push([bytes[i], bytes[i + 1]]);
-      }
-    }
-    if (!stroke.length) throw new Error('Invalid note');
-    result.push(stroke);
-    return result;
-  }
-
-  function encodeNote() {
-    return btoa(strokes.map(stroke => stroke.map(([x, y]) =>
-      String.fromCharCode(x, y)).join('')).join('\xff\xff'));
-  }
-
-  if (viewing) {
-    try {
-      strokes = readNote(encodedNote);
-    } catch {
-      status.textContent = 'This card link is incomplete or invalid.';
-    }
-  }
+  let invalidNote = false;
 
   ink.strokeStyle = '#243d68';
   ink.fillStyle = '#243d68';
@@ -160,44 +131,164 @@
   ink.lineCap = 'round';
   ink.lineJoin = 'round';
 
-  function drawMark(point, previous) {
-    const [x, y] = point;
-    const px = x * paper.width / 250;
-    const py = y * paper.height / 250;
-    ink.beginPath();
-    if (previous) {
-      ink.moveTo(previous[0] * paper.width / 250, previous[1] * paper.height / 250);
-      ink.lineTo(px, py);
-      ink.stroke();
-    } else {
-      ink.arc(px, py, ink.lineWidth / 2, 0, 2 * Math.PI);
-      ink.fill();
+  if (viewing) {
+    try {
+      strokes = decodeNote(encodedNote);
+    } catch {
+      invalidNote = true;
     }
+  }
+
+  function encodeNote() {
+    const packed = strokes.map(stroke =>
+      stroke.map(([x, y]) => String.fromCharCode(
+        x >> 4,
+        ((x & 15) << 4) | (y >> 8),
+        y & 255
+      )).join('')
+    ).join('\xff\xff\xff');
+
+    return 'v2.' + btoa(packed);
+  }
+
+  function decodeNote(encoded) {
+    const precise = encoded.startsWith('v2.');
+    const stride = precise ? 3 : 2;
+    const sourceScale = precise ? PEN_SCALE : 250;
+    const bytes = atob(precise ? encoded.slice(3) : encoded);
+
+    if (!bytes.length || bytes.length % stride !== 0) {
+      throw new Error('Invalid note');
+    }
+
+    const result = [];
+    let stroke = [];
+
+    for (let i = 0; i < bytes.length; i += stride) {
+      const a = bytes.charCodeAt(i);
+      const b = bytes.charCodeAt(i + 1);
+      const c = precise ? bytes.charCodeAt(i + 2) : 255;
+
+      if (a === 255 && b === 255 && c === 255) {
+        if (!stroke.length) throw new Error('Invalid stroke');
+        result.push(stroke);
+        stroke = [];
+        continue;
+      }
+
+      const x = precise ? (a << 4) | (b >> 4) : a;
+      const y = precise ? ((b & 15) << 8) | c : b;
+      if (x > sourceScale || y > sourceScale) throw new Error('Invalid point');
+
+      stroke.push([
+        Math.round(x * PEN_SCALE / sourceScale),
+        Math.round(y * PEN_SCALE / sourceScale)
+      ]);
+    }
+
+    if (!stroke.length) throw new Error('Invalid stroke');
+    result.push(stroke);
+    return result;
+  }
+
+  function canvasPoint([x, y]) {
+    return [x * paper.width / PEN_SCALE, y * paper.height / PEN_SCALE];
+  }
+
+  function drawDot(point) {
+    ink.beginPath();
+    ink.arc(point[0], point[1], ink.lineWidth / 2, 0, Math.PI * 2);
+    ink.fill();
+  }
+
+  function drawStroke(stroke) {
+    const points = stroke.map(canvasPoint);
+    if (points.length === 1) {
+      drawDot(points[0]);
+      return;
+    }
+
+    ink.beginPath();
+    ink.moveTo(...points[0]);
+
+    for (let i = 1; i < points.length - 1; i++) {
+      const [x, y] = points[i];
+      const [nextX, nextY] = points[i + 1];
+      ink.quadraticCurveTo(x, y, (x + nextX) / 2, (y + nextY) / 2);
+    }
+
+    ink.lineTo(...points[points.length - 1]);
+    ink.stroke();
   }
 
   function redraw() {
     ink.clearRect(0, 0, paper.width, paper.height);
-    for (const stroke of strokes) {
-      stroke.forEach((point, i) => drawMark(point, stroke[i - 1]));
-    }
+    for (const stroke of strokes) drawStroke(stroke);
+  }
+
+  function updateButtons() {
+    undo.disabled = share.disabled = active !== null || strokes.length === 0;
+  }
+
+  function clearShareResult() {
+    shareURL.hidden = true;
+    status.textContent = '';
   }
 
   function showNote(open) {
     cover.hidden = open;
     tablet.hidden = !open;
+    turn.setAttribute('aria-expanded', String(open));
     turn.textContent = open ? 'Back to cover' : viewing ? 'Open card' : 'Write note';
-    hint.textContent = open
-      ? viewing ? 'Swipe left to return' : 'Write with your Apple Pencil, finger, or mouse'
-      : viewing ? 'Swipe right to open' : 'Open the card to write your note';
-    undo.hidden = !open || viewing;
-    share.hidden = !open || viewing;
-    undo.disabled = share.disabled = strokes.length === 0;
-    shareURL.hidden = true;
-    if (open) redraw();
+
+    hint.textContent = viewing
+      ? (open ? 'Swipe left to return' : 'Swipe right to open')
+      : (open ? 'Write directly on the lined paper' : 'Open the card to write your note');
+
+    undo.hidden = share.hidden = !open || viewing;
+    clearShareResult();
+    updateButtons();
+
+    if (open) {
+      redraw();
+      if (invalidNote) status.textContent = 'This card link is incomplete or invalid.';
+    }
   }
 
-  paper.classList.toggle('writing', !viewing);
-  showNote(false);
+  function addPoint(event, bounds) {
+    const quantize = value =>
+      Math.round(Math.max(0, Math.min(1, value)) * PEN_SCALE);
+
+    const point = [
+      quantize((event.clientX - bounds.left) / bounds.width),
+      quantize((event.clientY - bounds.top) / bounds.height)
+    ];
+
+    const points = active.points;
+    const previous = points[points.length - 1];
+    if (previous && previous[0] === point[0] && previous[1] === point[1]) return;
+
+    points.push(point);
+    const [x, y] = canvasPoint(point);
+
+    // Show ink immediately. The finished stroke is redrawn as a smooth curve.
+    if (previous) {
+      ink.beginPath();
+      ink.moveTo(...canvasPoint(previous));
+      ink.lineTo(x, y);
+      ink.stroke();
+    } else {
+      drawDot([x, y]);
+    }
+  }
+
+  function finishStroke(event) {
+    if (active?.id !== event.pointerId) return;
+    if (event.type === 'pointerup') addPoint(event, paper.getBoundingClientRect());
+    active = null;
+    redraw();
+    updateButtons();
+  }
 
   turn.addEventListener('click', () => showNote(tablet.hidden));
 
@@ -207,78 +298,65 @@
       gesture = { id: event.pointerId, x: event.clientX, y: event.clientY };
       surface.setPointerCapture(event.pointerId);
     });
+
     surface.addEventListener('pointercancel', () => { gesture = null; });
+
     surface.addEventListener('pointerup', event => {
-      if (!gesture || gesture.id !== event.pointerId) return;
+      if (gesture?.id !== event.pointerId) return;
+
       const dx = event.clientX - gesture.x;
       const dy = event.clientY - gesture.y;
       gesture = null;
+
       if (Math.abs(dx) >= 48 && Math.abs(dx) > Math.abs(dy) * 1.4) {
         showNote(dx > 0);
       }
     });
-  }
+  } else {
+    paper.classList.add('writing');
 
-  function addPoint(event) {
-    const bounds = paper.getBoundingClientRect();
-    const quantize = ratio => Math.round(Math.max(0, Math.min(1, ratio)) * 250);
-    const point = [
-      quantize((event.clientX - bounds.left) / bounds.width),
-      quantize((event.clientY - bounds.top) / bounds.height)
-    ];
-    const previous = activeStroke.points.at(-1);
-    if (previous && previous[0] === point[0] && previous[1] === point[1]) return;
-    activeStroke.points.push(point);
-    drawMark(point, previous);
-  }
-
-  if (!viewing) {
     paper.addEventListener('pointerdown', event => {
-      if (activeStroke || event.button !== 0) return;
-      activeStroke = { id: event.pointerId, points: [] };
-      strokes.push(activeStroke.points);
+      if (active || event.button !== 0) return;
+
+      active = { id: event.pointerId, points: [] };
+      strokes.push(active.points);
       paper.setPointerCapture(event.pointerId);
-      addPoint(event);
-      undo.disabled = share.disabled = false;
-      shareURL.hidden = true;
-      status.textContent = '';
+      addPoint(event, paper.getBoundingClientRect());
+      clearShareResult();
+      updateButtons();
     });
 
     paper.addEventListener('pointermove', event => {
-      if (activeStroke?.id !== event.pointerId) return;
+      if (active?.id !== event.pointerId) return;
+
+      const bounds = paper.getBoundingClientRect();
       const samples = event.getCoalescedEvents?.();
-      for (const sample of samples?.length ? samples : [event]) addPoint(sample);
+      for (const sample of samples?.length ? samples : [event]) {
+        addPoint(sample, bounds);
+      }
     });
 
-    paper.addEventListener('pointerup', event => {
-      if (activeStroke?.id !== event.pointerId) return;
-      addPoint(event);
-      activeStroke = null;
-    });
-
-    for (const type of ['pointercancel', 'lostpointercapture']) {
-      paper.addEventListener(type, event => {
-        if (activeStroke?.id === event.pointerId) activeStroke = null;
-      });
-    }
+    paper.addEventListener('pointerup', finishStroke);
+    paper.addEventListener('pointercancel', finishStroke);
+    paper.addEventListener('lostpointercapture', finishStroke);
 
     undo.addEventListener('click', () => {
-      if (activeStroke) return;
+      if (active) return;
       strokes.pop();
       redraw();
-      undo.disabled = share.disabled = strokes.length === 0;
-      shareURL.hidden = true;
-      status.textContent = '';
+      clearShareResult();
+      updateButtons();
     });
 
     share.addEventListener('click', async () => {
-      if (!strokes.length || activeStroke) return;
+      if (active || !strokes.length) return;
+
       if (location.protocol === 'file:') {
-        status.textContent = 'Open the hosted version to create a shareable link.';
+        status.textContent = 'Open this page with Live Server or GitHub Pages to share it.';
         return;
       }
 
-      const url = new URL(makerURL.href);
+      const url = new URL(makerURL);
       url.hash = new URLSearchParams({ note: encodeNote() }).toString();
       shareURL.value = url.href;
       shareURL.hidden = false;
@@ -293,6 +371,8 @@
       }
     });
   }
+
+  showNote(false);
 </script>
 </body>
 </html>
