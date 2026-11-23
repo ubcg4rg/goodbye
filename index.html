@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Little Cards</title>
+  <style>
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+
+    body {
+      margin: 0;
+      min-height: 100svh;
+      display: grid;
+      place-items: center;
+      background: #f5eadf;
+      color: #382638;
+      font: 1rem system-ui, sans-serif;
+    }
+
+    main { width: min(92vw, 36rem); padding: 1.5rem 0; text-align: center; }
+    .surface { touch-action: pan-y; }
+
+    .cover {
+      display: grid;
+      align-content: center;
+      min-height: clamp(18rem, 55vh, 28rem);
+      padding: 2rem;
+      border-radius: 1.4rem;
+      color: #fff0dd;
+    /*  background:
+        radial-gradient(circle at 50% 83%, #ffc49b 0 3rem, transparent 3.05rem),
+        linear-gradient(155deg, #36243f 10%, #70435e 58%, #cf806d);*/
+       background: url("image.jpeg") center / cover no-repeat;
+      box-shadow: 0 1rem 2.5rem #38263826;
+    }
+
+    h1 { margin: 0; font: italic clamp(2.8rem, 9vw, 5rem)/1 Georgia, serif; }
+    .cover p { margin: 0 0 1rem; }
+
+    .tablet { padding: .65rem; border-radius: 1.3rem; background: #272333; }
+    canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: .75rem;
+      background: repeating-linear-gradient(
+        #fff8e8 0 27px, #ded9ce 27px 28px
+      );
+    }
+
+    canvas.writing { touch-action: none; cursor: crosshair; }
+    .controls { display: flex; flex-wrap: wrap; justify-content: center; gap: .5rem; }
+    button { padding: .65rem .9rem; border: 0; border-radius: 2rem;
+      background: #563752; color: white; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: default; }
+    :focus-visible { outline: 3px solid #956340; outline-offset: 3px; }
+    #hint { margin: 1rem 0 .7rem; }
+    #status:empty { display: none; }
+    #share-url { width: 100%; padding: .6rem; margin-top: .5rem; font: inherit; }
+    footer { margin-top: 1.5rem; font-size: .85rem; }
+    footer a { color: inherit; }
+
+    #note{
+      color: white;
+      font-size: 1.5rem;
+      color: black;
+    }
+  </style>
+</head>
+<body>
+<main>
+   <i><p id = "note">Until next time....👋</p></i>
+  <div class="surface" id="surface">
+    <section class="cover" id="cover">
+
+     <!-- <h1>Until<br>Next Time.</h1> -->
+    </section>
+
+    <section class="tablet" id="tablet" aria-label="Handwritten note" hidden>
+      <canvas id="paper" width="1000" height="1200">
+        This browser cannot display the handwritten note.
+      </canvas>
+    </section>
+  </div>
+
+  <p id="hint"></p>
+  <div class="controls">
+    <button type="button" id="turn"></button>
+    <button type="button" id="undo" hidden>Undo</button>
+    <button type="button" id="share" hidden>Copy card link</button>
+  </div>
+  <input id="share-url" aria-label="Card link" readonly hidden>
+  <p id="status" role="status"></p>
+
+  <footer><a id="brand" href="./">G4RG Creations  🖤</a></footer>
+
+</main>
+
+<script>
+  const cover = document.querySelector('#cover');
+  const tablet = document.querySelector('#tablet');
+  const paper = document.querySelector('#paper');
+  const surface = document.querySelector('#surface');
+  const turn = document.querySelector('#turn');
+  const undo = document.querySelector('#undo');
+  const share = document.querySelector('#share');
+  const shareURL = document.querySelector('#share-url');
+  const hint = document.querySelector('#hint');
+  const status = document.querySelector('#status');
+  const ink = paper.getContext('2d');
+
+  const makerURL = new URL(location.href);
+  makerURL.hash = '';
+  document.querySelector('#brand').href = makerURL.href;
+
+  const encodedNote = new URLSearchParams(location.hash.slice(1)).get('note');
+  const viewing = encodedNote !== null;
+  let strokes = [];
+  let activeStroke = null;
+  let gesture = null;
+
+  function readNote(encoded) {
+    const bytes = Uint8Array.from(atob(encoded), char => char.charCodeAt(0));
+    if (!bytes.length || bytes.length % 2) throw new Error('Invalid note');
+
+    const result = [];
+    let stroke = [];
+    for (let i = 0; i < bytes.length; i += 2) {
+      if (bytes[i] === 255 && bytes[i + 1] === 255) {
+        if (!stroke.length) throw new Error('Invalid stroke');
+        result.push(stroke);
+        stroke = [];
+      } else {
+        if (bytes[i] > 250 || bytes[i + 1] > 250) throw new Error('Invalid point');
+        stroke.push([bytes[i], bytes[i + 1]]);
+      }
+    }
+    if (!stroke.length) throw new Error('Invalid note');
+    result.push(stroke);
+    return result;
+  }
+
+  function encodeNote() {
+    return btoa(strokes.map(stroke => stroke.map(([x, y]) =>
+      String.fromCharCode(x, y)).join('')).join('\xff\xff'));
+  }
+
+  if (viewing) {
+    try {
+      strokes = readNote(encodedNote);
+    } catch {
+      status.textContent = 'This card link is incomplete or invalid.';
+    }
+  }
+
+  ink.strokeStyle = '#243d68';
+  ink.fillStyle = '#243d68';
+  ink.lineWidth = 4;
+  ink.lineCap = 'round';
+  ink.lineJoin = 'round';
+
+  function drawMark(point, previous) {
+    const [x, y] = point;
+    const px = x * paper.width / 250;
+    const py = y * paper.height / 250;
+    ink.beginPath();
+    if (previous) {
+      ink.moveTo(previous[0] * paper.width / 250, previous[1] * paper.height / 250);
+      ink.lineTo(px, py);
+      ink.stroke();
+    } else {
+      ink.arc(px, py, ink.lineWidth / 2, 0, 2 * Math.PI);
+      ink.fill();
+    }
+  }
+
+  function redraw() {
+    ink.clearRect(0, 0, paper.width, paper.height);
+    for (const stroke of strokes) {
+      stroke.forEach((point, i) => drawMark(point, stroke[i - 1]));
+    }
+  }
+
+  function showNote(open) {
+    cover.hidden = open;
+    tablet.hidden = !open;
+    turn.textContent = open ? 'Back to cover' : viewing ? 'Open card' : 'Write note';
+    hint.textContent = open
+      ? viewing ? 'Swipe left to return' : 'Write with your Apple Pencil, finger, or mouse'
+      : viewing ? 'Swipe right to open' : 'Open the card to write your note';
+    undo.hidden = !open || viewing;
+    share.hidden = !open || viewing;
+    undo.disabled = share.disabled = strokes.length === 0;
+    shareURL.hidden = true;
+    if (open) redraw();
+  }
+
+  paper.classList.toggle('writing', !viewing);
+  showNote(false);
+
+  turn.addEventListener('click', () => showNote(tablet.hidden));
+
+  if (viewing) {
+    surface.addEventListener('pointerdown', event => {
+      if (!event.isPrimary || event.button !== 0) return;
+      gesture = { id: event.pointerId, x: event.clientX, y: event.clientY };
+      surface.setPointerCapture(event.pointerId);
+    });
+    surface.addEventListener('pointercancel', () => { gesture = null; });
+    surface.addEventListener('pointerup', event => {
+      if (!gesture || gesture.id !== event.pointerId) return;
+      const dx = event.clientX - gesture.x;
+      const dy = event.clientY - gesture.y;
+      gesture = null;
+      if (Math.abs(dx) >= 48 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+        showNote(dx > 0);
+      }
+    });
+  }
+
+  function addPoint(event) {
+    const bounds = paper.getBoundingClientRect();
+    const quantize = ratio => Math.round(Math.max(0, Math.min(1, ratio)) * 250);
+    const point = [
+      quantize((event.clientX - bounds.left) / bounds.width),
+      quantize((event.clientY - bounds.top) / bounds.height)
+    ];
+    const previous = activeStroke.points.at(-1);
+    if (previous && previous[0] === point[0] && previous[1] === point[1]) return;
+    activeStroke.points.push(point);
+    drawMark(point, previous);
+  }
+
+  if (!viewing) {
+    paper.addEventListener('pointerdown', event => {
+      if (activeStroke || event.button !== 0) return;
+      activeStroke = { id: event.pointerId, points: [] };
+      strokes.push(activeStroke.points);
+      paper.setPointerCapture(event.pointerId);
+      addPoint(event);
+      undo.disabled = share.disabled = false;
+      shareURL.hidden = true;
+      status.textContent = '';
+    });
+
+    paper.addEventListener('pointermove', event => {
+      if (activeStroke?.id !== event.pointerId) return;
+      const samples = event.getCoalescedEvents?.();
+      for (const sample of samples?.length ? samples : [event]) addPoint(sample);
+    });
+
+    paper.addEventListener('pointerup', event => {
+      if (activeStroke?.id !== event.pointerId) return;
+      addPoint(event);
+      activeStroke = null;
+    });
+
+    for (const type of ['pointercancel', 'lostpointercapture']) {
+      paper.addEventListener(type, event => {
+        if (activeStroke?.id === event.pointerId) activeStroke = null;
+      });
+    }
+
+    undo.addEventListener('click', () => {
+      if (activeStroke) return;
+      strokes.pop();
+      redraw();
+      undo.disabled = share.disabled = strokes.length === 0;
+      shareURL.hidden = true;
+      status.textContent = '';
+    });
+
+    share.addEventListener('click', async () => {
+      if (!strokes.length || activeStroke) return;
+      if (location.protocol === 'file:') {
+        status.textContent = 'Open the hosted version to create a shareable link.';
+        return;
+      }
+
+      const url = new URL(makerURL.href);
+      url.hash = new URLSearchParams({ note: encodeNote() }).toString();
+      shareURL.value = url.href;
+      shareURL.hidden = false;
+
+      try {
+        await navigator.clipboard.writeText(url.href);
+        status.textContent = 'Card link copied.';
+      } catch {
+        shareURL.focus();
+        shareURL.select();
+        status.textContent = 'Copy the card link from the field above.';
+      }
+    });
+  }
+</script>
+</body>
+</html>
